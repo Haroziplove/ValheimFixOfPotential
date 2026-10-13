@@ -1,0 +1,9 @@
+{
+  "name": "SafeRefinement",
+  "version_number": "1.0.0",
+  "website_url": "",
+  "description": "Forge of Potential failures keep the item. Success chance stays vanilla. Client-side BepInEx plugin.",
+  "dependencies": [
+    "denikson-BepInExPack_Valheim-5.4.2202"
+  ]
+}

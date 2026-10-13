@@ -1,0 +1,6 @@
+<Project>
+  <PropertyGroup>
+    <!-- Valheim client install. The folder that contains valheim.exe and BepInEx. -->
+    <VALHEIM_DIR>C:\Path\To\Valheim</VALHEIM_DIR>
+  </PropertyGroup>
+</Project>

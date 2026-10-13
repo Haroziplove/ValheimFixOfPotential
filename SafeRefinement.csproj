@@ -1,0 +1,56 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <Import Project="Environment.props" />
+
+  <PropertyGroup>
+    <TargetFramework>net462</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <Nullable>disable</Nullable>
+    <AssemblyName>SafeRefinement</AssemblyName>
+    <RootNamespace>SafeRefinement</RootNamespace>
+    <Version>1.0.0</Version>
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="BepInEx.AssemblyPublicizer.MSBuild" Version="0.4.2" PrivateAssets="all" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Reference Include="assembly_valheim">
+      <HintPath>$(VALHEIM_DIR)\valheim_Data\Managed\assembly_valheim.dll</HintPath>
+      <Private>false</Private>
+      <Publicize>true</Publicize>
+    </Reference>
+    <Reference Include="assembly_utils">
+      <HintPath>$(VALHEIM_DIR)\valheim_Data\Managed\assembly_utils.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="assembly_guiutils">
+      <HintPath>$(VALHEIM_DIR)\valheim_Data\Managed\assembly_guiutils.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine">
+      <HintPath>$(VALHEIM_DIR)\valheim_Data\Managed\UnityEngine.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine.CoreModule">
+      <HintPath>$(VALHEIM_DIR)\valheim_Data\Managed\UnityEngine.CoreModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="BepInEx">
+      <HintPath>$(VALHEIM_DIR)\BepInEx\core\BepInEx.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="0Harmony">
+      <HintPath>$(VALHEIM_DIR)\BepInEx\core\0Harmony.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
+
+  <Target Name="CopyToClientPlugins" AfterTargets="Build">
+    <MakeDir Directories="$(VALHEIM_DIR)\BepInEx\plugins\SafeRefinement" />
+    <Copy SourceFiles="$(TargetPath)" DestinationFolder="$(VALHEIM_DIR)\BepInEx\plugins\SafeRefinement\" SkipUnchangedFiles="true" />
+  </Target>
+</Project>
