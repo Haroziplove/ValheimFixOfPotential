@@ -2,6 +2,8 @@
 
 Client mod for the Forge of Potential. A failed refinement keeps the item. The success chance stays the same as vanilla (65% per idol).
 
+This release works with the current Valheim version, **1.0.17**.
+
 Install it on every player who should be protected. The dedicated server does not roll the refinement, so a copy of the DLL on the server does nothing by itself.
 
 ## Install
@@ -21,13 +23,15 @@ If `Valheim\BepInEx` is already there, skip to step 2.
 
 ### 2. Install this mod
 
-1. Copy `SafeRefinement.dll` to:
+Download the [1.0.0 release](https://github.com/Haroziplove/ValheimFixOfPotential/releases/tag/v1.0.0). The zip contains only `SafeRefinement.dll`, already placed in `BepInEx\plugins\SafeRefinement\`.
+
+1. Extract the zip into the Valheim folder (the same folder as `valheim.exe`).
+2. You should end up with:
 
    `Valheim\BepInEx\plugins\SafeRefinement\SafeRefinement.dll`
 
-   Create the `SafeRefinement` folder if it is not there.
-2. Start Valheim and join your world.
-3. Open `Valheim\BepInEx\LogOutput.log`. It should contain:
+3. Start Valheim and join your world.
+4. Open `Valheim\BepInEx\LogOutput.log`. It should contain:
 
    `SafeRefinement 1.0.0 patched InventoryGui.DoCrafting`
 

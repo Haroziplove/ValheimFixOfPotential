@@ -11,9 +11,6 @@ namespace SafeRefinement
 {
     internal static class DoCraftingPatch
     {
-        private const string BreakLog = "Upgrader <color=red>BROKE</color> {0} level {1} and was destroyed!";
-        private const string DowngradeLog = "Upgrader <color=orange>FAILED</color> {0} level {1}, level was reduced!";
-
         public static bool TryApply(Harmony harmony, ManualLogSource log)
         {
             MethodInfo method = AccessTools.Method(typeof(InventoryGui), "DoCrafting", new[] { typeof(Player) });
@@ -45,91 +42,215 @@ namespace SafeRefinement
 
         private static void ReplaceBreakBody(List<CodeInstruction> codes)
         {
-            int broke = FindString(codes, BreakLog);
-            int downgrade = FindString(codes, DowngradeLog);
-            if (broke < 0 || downgrade < 0 || downgrade <= broke)
+            if (!TryFindBreak(codes, out int branchIndex, out int bodyStart, out int bodyEnd, out Label mergeLabel, out Label _))
             {
-                throw new InvalidOperationException("DoCrafting break branch was not found. The game method no longer matches Valheim 1.0.17.");
+                throw new InvalidOperationException("Could not find the m_breakChance branch in InventoryGui.DoCrafting. " + Describe(codes));
             }
 
-            int successFlagStore = FindLastLocalStore(codes, 16, broke);
-            if (successFlagStore < 0 || successFlagStore + 1 >= codes.Count)
+            int resultStore = FindResultStore(codes, branchIndex);
+            if (resultStore < 0 || codes[resultStore].operand == null)
             {
-                throw new InvalidOperationException("DoCrafting success branch exit was not found.");
-            }
-
-            CodeInstruction successExit = codes[successFlagStore + 1];
-            if (successExit.opcode != OpCodes.Br && successExit.opcode != OpCodes.Br_S)
-            {
-                throw new InvalidOperationException("DoCrafting success branch does not branch to the shared exit.");
+                throw new InvalidOperationException("Could not find the craft result local in InventoryGui.DoCrafting. " + Describe(codes));
             }
 
             var replacement = new List<CodeInstruction>
             {
                 new CodeInstruction(OpCodes.Ldarg_0),
                 new CodeInstruction(OpCodes.Ldarg_1),
-                LoadLocal(codes, 20),
-                LoadLocal(codes, 0),
-                LoadLocal(codes, 4),
-                LoadLocal(codes, 8),
-                LoadLocal(codes, 9),
-                LoadLocal(codes, 10),
-                LoadLocal(codes, 11),
-                LoadLocal(codes, 14),
-                AddressOf(codes, 15),
+                new CodeInstruction(OpCodes.Ldloca, codes[resultStore].operand),
                 new CodeInstruction(OpCodes.Call, AccessTools.Method(typeof(DoCraftingPatch), nameof(ApplyBreakBranch))),
-                new CodeInstruction(OpCodes.Br, successExit.operand)
+                new CodeInstruction(OpCodes.Br, mergeLabel)
             };
-            replacement[0].labels.AddRange(codes[broke].labels);
-            replacement[0].blocks.AddRange(codes[broke].blocks);
+            replacement[0].labels.AddRange(codes[bodyStart].labels);
+            replacement[0].blocks.AddRange(codes[bodyStart].blocks);
 
-            codes.RemoveRange(broke, downgrade - broke);
-            codes.InsertRange(broke, replacement);
+            codes.RemoveRange(bodyStart, bodyEnd - bodyStart);
+            codes.InsertRange(bodyStart, replacement);
         }
 
         private static void InsertRollObserver(List<CodeInstruction> codes)
         {
-            int rangeCall = -1;
-            for (int i = 0; i < codes.Count; i++)
+            int rangeCall = FindRefinementRoll(codes);
+            if (rangeCall < 0 || rangeCall + 1 >= codes.Count || !IsStore(codes[rangeCall + 1]) || codes[rangeCall + 1].operand == null)
             {
-                if (codes[i].opcode != OpCodes.Call || !(codes[i].operand is MethodInfo method) || method.Name != "Range")
-                {
-                    continue;
-                }
-
-                ParameterInfo[] parameters = method.GetParameters();
-                if (parameters.Length == 2 && parameters[0].ParameterType == typeof(float) && parameters[1].ParameterType == typeof(float))
-                {
-                    if (rangeCall >= 0)
-                    {
-                        throw new InvalidOperationException("DoCrafting contains more than one Random.Range(float, float) call.");
-                    }
-
-                    rangeCall = i;
-                }
+                throw new InvalidOperationException("The refinement Random.Range result was not found. The roll was left unchanged and the patch was not applied. " + Describe(codes));
             }
 
-            if (rangeCall < 0 || rangeCall + 1 >= codes.Count || !IsStore(codes[rangeCall + 1], 24))
-            {
-                throw new InvalidOperationException("The refinement Random.Range result was not found. The roll was left unchanged and the patch was not applied.");
-            }
-
-            int insertAt = rangeCall + 2;
             var observer = new List<CodeInstruction>
             {
                 new CodeInstruction(OpCodes.Ldarg_1),
                 new CodeInstruction(OpCodes.Ldarg_0),
-                LoadLocal(codes, 20),
-                LoadLocal(codes, 0),
-                LoadLocal(codes, 24),
+                new CodeInstruction(OpCodes.Ldloc, codes[rangeCall + 1].operand),
                 new CodeInstruction(OpCodes.Call, AccessTools.Method(typeof(DoCraftingPatch), nameof(ObserveRoll)))
             };
-            codes.InsertRange(insertAt, observer);
+            codes.InsertRange(rangeCall + 2, observer);
         }
 
-        private static void ObserveRoll(Player player, InventoryGui gui, ItemDrop.ItemData idol, int targetQuality, float roll)
+        private static bool TryFindBreak(List<CodeInstruction> codes, out int branchIndex, out int bodyStart, out int bodyEnd, out Label mergeLabel, out Label downgradeLabel)
         {
-            if (!ModConfig.LogAttempts.Value || player == null || gui == null || idol == null || gui.m_craftUpgradeItem == null)
+            branchIndex = -1;
+            bodyStart = -1;
+            bodyEnd = -1;
+            mergeLabel = default(Label);
+            downgradeLabel = default(Label);
+            for (int i = 0; i < codes.Count; i++)
+            {
+                if (!IsField(codes[i], "m_breakChance"))
+                {
+                    continue;
+                }
+
+                for (int j = i + 1; j < codes.Count && j < i + 8; j++)
+                {
+                    if (codes[j].opcode.FlowControl != FlowControl.Cond_Branch || !(codes[j].operand is Label target))
+                    {
+                        continue;
+                    }
+
+                    int downgrade = IndexOfLabel(codes, target);
+                    int mergeAt = FindUnconditionalBranch(codes, i, 40);
+                    if (downgrade <= j || mergeAt < 0 || !(codes[mergeAt].operand is Label merge))
+                    {
+                        continue;
+                    }
+
+                    branchIndex = j;
+                    bodyStart = j + 1;
+                    bodyEnd = downgrade;
+                    mergeLabel = merge;
+                    downgradeLabel = target;
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        private static int FindRefinementRoll(List<CodeInstruction> codes)
+        {
+            int found = -1;
+            for (int i = 0; i < codes.Count; i++)
+            {
+                if (!IsFloatRange(codes[i]))
+                {
+                    continue;
+                }
+
+                found = i;
+            }
+
+            return found;
+        }
+
+        private static int FindResultStore(List<CodeInstruction> codes, int before)
+        {
+            for (int i = before; i >= 0; i--)
+            {
+                if (!IsMethod(codes[i], "AddItem"))
+                {
+                    continue;
+                }
+
+                for (int j = i + 1; j < codes.Count && j < i + 4; j++)
+                {
+                    if (IsStore(codes[j]))
+                    {
+                        return j;
+                    }
+                }
+            }
+
+            return -1;
+        }
+
+        private static int FindUnconditionalBranch(List<CodeInstruction> codes, int from, int limit)
+        {
+            int stop = Math.Max(0, from - limit);
+            for (int i = from; i >= stop; i--)
+            {
+                if (codes[i].opcode.FlowControl == FlowControl.Branch && codes[i].operand is Label)
+                {
+                    return i;
+                }
+            }
+
+            return -1;
+        }
+
+        private static int IndexOfLabel(List<CodeInstruction> codes, Label label)
+        {
+            for (int i = 0; i < codes.Count; i++)
+            {
+                if (codes[i].labels != null && codes[i].labels.Contains(label))
+                {
+                    return i;
+                }
+            }
+
+            return -1;
+        }
+
+        private static bool IsFloatRange(CodeInstruction code)
+        {
+            if ((code.opcode != OpCodes.Call && code.opcode != OpCodes.Callvirt) || !(code.operand is MethodInfo method) || method.Name != "Range")
+            {
+                return false;
+            }
+
+            ParameterInfo[] parameters = method.GetParameters();
+            return parameters.Length == 2 && parameters[0].ParameterType == typeof(float) && parameters[1].ParameterType == typeof(float);
+        }
+
+        private static bool IsField(CodeInstruction code, string name)
+        {
+            if (code.operand is FieldInfo field)
+            {
+                return field.Name == name;
+            }
+
+            return code.operand != null && code.operand.ToString().IndexOf(name, StringComparison.Ordinal) >= 0 && (code.opcode == OpCodes.Ldfld || code.opcode == OpCodes.Ldsfld);
+        }
+
+        private static bool IsMethod(CodeInstruction code, string name)
+        {
+            return (code.opcode == OpCodes.Call || code.opcode == OpCodes.Callvirt) && code.operand is MethodInfo method && method.Name == name;
+        }
+
+        private static bool IsStore(CodeInstruction code)
+        {
+            string name = code.opcode.Name;
+            return name == "stloc" || name == "stloc.s" || (name != null && name.StartsWith("stloc.", StringComparison.Ordinal));
+        }
+
+        private static string Describe(List<CodeInstruction> codes)
+        {
+            int strings = 0;
+            int breakFields = 0;
+            foreach (CodeInstruction code in codes)
+            {
+                if (code.operand is string)
+                {
+                    strings++;
+                }
+
+                if (IsField(code, "m_breakChance"))
+                {
+                    breakFields++;
+                }
+            }
+
+            return "instructions=" + codes.Count + " strings=" + strings + " breakChanceFields=" + breakFields;
+        }
+
+        private static void ObserveRoll(Player player, InventoryGui gui, float roll)
+        {
+            if (!ModConfig.LogAttempts.Value || player == null || gui == null || gui.m_craftUpgradeItem == null || gui.m_craftRecipe == null)
+            {
+                return;
+            }
+
+            ItemDrop.ItemData idol = FindIdol(gui.m_craftRecipe);
+            if (idol == null)
             {
                 return;
             }
@@ -163,20 +284,27 @@ namespace SafeRefinement
                 + " outcome=" + outcome);
         }
 
-        private static void ApplyBreakBranch(
-            InventoryGui gui,
-            Player player,
-            ItemDrop.ItemData idol,
-            int targetQuality,
-            int amount,
-            int variant,
-            Vector2i position,
-            long playerId,
-            string playerName,
-            bool cheated,
-            ref ItemDrop.ItemData resultItem)
+        private static void ApplyBreakBranch(InventoryGui gui, Player player, ref ItemDrop.ItemData resultItem)
         {
             ItemDrop.ItemData item = gui.m_craftUpgradeItem;
+            Recipe recipe = gui.m_craftRecipe;
+            if (item == null || recipe == null)
+            {
+                return;
+            }
+
+            ItemDrop.ItemData idol = FindIdol(recipe);
+            if (idol == null)
+            {
+                return;
+            }
+
+            int targetQuality = item.m_quality + 1;
+            int amount = recipe.GetAmount(targetQuality, out int _, out ItemDrop.ItemData _, 1);
+            CraftingStation station = player.GetCurrentCraftingStation();
+            ZNetView stationView = station != null ? station.GetComponent<ZNetView>() : null;
+            bool stationCheated = stationView != null && stationView.GetZDO() != null && stationView.GetZDO().GetBool(ZDOVars.s_cheated);
+            bool cheated = (player.GetInventory().ItemCheated(recipe.m_resources) || player.NoCostCheat() || stationCheated) && !PlayerProfile.s_bypassCheatChecks;
             FailureOutcome outcome = !ModConfig.Enabled.Value ? FailureOutcome.Vanilla : ModConfig.Outcome.Value;
             if (outcome == FailureOutcome.KeepItem)
             {
@@ -186,11 +314,29 @@ namespace SafeRefinement
 
             if (outcome == FailureOutcome.Downgrade)
             {
-                Downgrade(player, gui, item, targetQuality, amount, variant, position, playerId, playerName, cheated, ref resultItem);
+                Downgrade(player, gui, item, targetQuality, amount, item.m_variant, item.m_gridPos, player.GetPlayerID(), player.GetPlayerName(), cheated, ref resultItem);
                 return;
             }
 
-            BreakVanilla(player, gui, idol, item, targetQuality, playerId, playerName, cheated, ref resultItem);
+            BreakVanilla(player, gui, idol, item, targetQuality, player.GetPlayerID(), player.GetPlayerName(), cheated, ref resultItem);
+        }
+
+        private static ItemDrop.ItemData FindIdol(Recipe recipe)
+        {
+            if (recipe.m_resources == null)
+            {
+                return null;
+            }
+
+            foreach (Piece.Requirement requirement in recipe.m_resources)
+            {
+                if (requirement.m_upgraderResource && requirement.m_resItem != null)
+                {
+                    return requirement.m_resItem.m_itemData;
+                }
+            }
+
+            return null;
         }
 
         private static void KeepItem(Player player, ItemDrop.ItemData item, ref ItemDrop.ItemData resultItem)
@@ -305,151 +451,6 @@ namespace SafeRefinement
                     cheated);
                 ZLog.Log($"Upgrader returned {requirement.m_resItem.m_itemData.m_shared.m_name} x{count} to inventory");
             }
-        }
-
-        private static int FindString(List<CodeInstruction> codes, string text)
-        {
-            int found = -1;
-            for (int i = 0; i < codes.Count; i++)
-            {
-                if (codes[i].opcode == OpCodes.Ldstr && (string)codes[i].operand == text)
-                {
-                    if (found >= 0)
-                    {
-                        throw new InvalidOperationException("DoCrafting contains more than one copy of \"" + text + "\".");
-                    }
-
-                    found = i;
-                }
-            }
-
-            return found;
-        }
-
-        private static int FindLastLocalStore(List<CodeInstruction> codes, int index, int before)
-        {
-            int found = -1;
-            for (int i = 0; i < before; i++)
-            {
-                if (IsStore(codes[i], index))
-                {
-                    found = i;
-                }
-            }
-
-            return found;
-        }
-
-        private static bool IsStore(CodeInstruction instruction, int index)
-        {
-            return instruction.opcode == OpCodes.Stloc_S || instruction.opcode == OpCodes.Stloc
-                ? LocalIndex(instruction) == index
-                : false;
-        }
-
-        private static CodeInstruction LoadLocal(List<CodeInstruction> codes, int index)
-        {
-            CodeInstruction existing = FindLocalInstruction(codes, index);
-            if (existing.opcode == OpCodes.Ldloc_S || existing.opcode == OpCodes.Ldloc)
-            {
-                return new CodeInstruction(existing.opcode, existing.operand);
-            }
-
-            if (existing.opcode == OpCodes.Stloc_S)
-            {
-                return new CodeInstruction(OpCodes.Ldloc_S, existing.operand);
-            }
-
-            if (existing.opcode == OpCodes.Stloc)
-            {
-                return new CodeInstruction(OpCodes.Ldloc, existing.operand);
-            }
-
-            throw new InvalidOperationException("Cannot load local " + index + " from opcode " + existing.opcode);
-        }
-
-        private static CodeInstruction AddressOf(List<CodeInstruction> codes, int index)
-        {
-            foreach (CodeInstruction code in codes)
-            {
-                if (LocalIndex(code) == index && (code.opcode == OpCodes.Ldloca_S || code.opcode == OpCodes.Ldloca))
-                {
-                    return new CodeInstruction(code.opcode, code.operand);
-                }
-            }
-
-            CodeInstruction existing = FindLocalInstruction(codes, index);
-            if (existing.opcode == OpCodes.Ldloc_S || existing.opcode == OpCodes.Stloc_S)
-            {
-                return new CodeInstruction(OpCodes.Ldloca_S, existing.operand);
-            }
-
-            if (existing.opcode == OpCodes.Ldloc || existing.opcode == OpCodes.Stloc)
-            {
-                return new CodeInstruction(OpCodes.Ldloca, existing.operand);
-            }
-
-            throw new InvalidOperationException("Cannot address local " + index + ".");
-        }
-
-        private static CodeInstruction FindLocalInstruction(List<CodeInstruction> codes, int index)
-        {
-            foreach (CodeInstruction code in codes)
-            {
-                if (LocalIndex(code) == index)
-                {
-                    return code;
-                }
-            }
-
-            throw new InvalidOperationException("Local " + index + " was not found in DoCrafting.");
-        }
-
-        private static int LocalIndex(CodeInstruction instruction)
-        {
-            object operand = instruction.operand;
-            if (operand == null)
-            {
-                return -1;
-            }
-
-            if (operand is LocalBuilder builder)
-            {
-                return builder.LocalIndex;
-            }
-
-            if (operand is LocalVariableInfo variable)
-            {
-                return variable.LocalIndex;
-            }
-
-            if (operand is byte unsigned)
-            {
-                return unsigned;
-            }
-
-            if (operand is sbyte signed)
-            {
-                return signed;
-            }
-
-            if (operand is short shortIndex)
-            {
-                return shortIndex;
-            }
-
-            if (operand is int intIndex)
-            {
-                return intIndex;
-            }
-
-            PropertyInfo property = operand.GetType().GetProperty("LocalIndex") ?? operand.GetType().GetProperty("Index");
-            if (property != null && property.PropertyType == typeof(int))
-            {
-                return (int)property.GetValue(operand, null);
-            }
-
-            return -1;
         }
     }
 }
